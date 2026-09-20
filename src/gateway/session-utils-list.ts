@@ -313,7 +313,7 @@ export function prepareProjectedSessionList(params: {
   return { prepared, presentation, filters };
 }
 
-/** One readiness await, then one synchronous selection/authorization/presentation boundary. */
+/** Prepare selected rows, then authorize and present them in one synchronous boundary. */
 export async function listProjectedSessions(params: {
   projection: SessionRowProjection;
   opts: SessionsListParams;
@@ -332,19 +332,33 @@ export async function listProjectedSessions(params: {
     yieldCount++;
     await projection.ensureMaterialized();
   } while (projection.needsMaterialization);
+  let prepareSyncMs = 0;
   const selectPage = () => {
-    const now = Date.now();
-    const { presentation, prepared, filters } = prepareProjectedSessionList({
-      projection,
-      opts,
-      context,
-      client,
-      now,
-    });
-    const selection = withAgentRosterFactsBatch(prepared.cfg, () =>
-      runSynchronousWork(selectSessionEntries({ ...filters, defaultLimit: 100 })),
-    );
-    return { now, presentation, prepared, selection };
+    const started = performance.now();
+    const syncCpu = diagnostics?.startSyncCpu();
+    try {
+      diagnostics?.mark("storeLoad");
+      const now = Date.now();
+      const { presentation, prepared, filters } = prepareProjectedSessionList({
+        projection,
+        opts,
+        context,
+        client,
+        now,
+      });
+      diagnostics?.mark("filterSetup");
+      const selection = withAgentRosterFactsBatch(prepared.cfg, () =>
+        runSynchronousWork(selectSessionEntries({ ...filters, defaultLimit: 100 })),
+      );
+      return { now, presentation, prepared, selection };
+    } finally {
+      diagnostics?.finishSyncCpu("prepareThreadCpuMs", syncCpu);
+      prepareSyncMs += performance.now() - started;
+      if (diagnostics) {
+        diagnostics.projection.prepareSyncMs = prepareSyncMs;
+      }
+      diagnostics?.mark("materialize");
+    }
   };
   let page: ReturnType<typeof selectPage>;
   return withReadySessionRows(
@@ -360,16 +374,11 @@ export async function listProjectedSessions(params: {
       const resumed = performance.now();
       const { now, presentation, prepared, selection } = page;
       const { cfg, getTarget } = prepared;
-      let cpuPhase: "prepareThreadCpuMs" | "rowThreadCpuMs" = "prepareThreadCpuMs";
+      diagnostics?.mark("sharing");
+      diagnostics?.mark("rows");
+      const rowsStarted = performance.now();
       let syncCpu = diagnostics?.startSyncCpu();
       try {
-        diagnostics?.mark("sharing");
-        diagnostics?.mark("rows");
-        const rowsStarted = performance.now();
-        diagnostics?.finishSyncCpu(cpuPhase, syncCpu);
-        syncCpu = undefined;
-        cpuPhase = "rowThreadCpuMs";
-        syncCpu = diagnostics?.startSyncCpu();
         let materializedRowCount = 0;
         projection.setArchivePageSize(selection.entries.length);
         const sessions = selection.entries.flatMap(([key], index) => {
@@ -414,9 +423,9 @@ export async function listProjectedSessions(params: {
         diagnostics?.mark("visibilityRepair");
         if (diagnostics) {
           Object.assign(diagnostics.projection, {
-            prepareSyncMs: rowsStarted - resumed,
+            prepareSyncMs,
             rowSyncMs: performance.now() - rowsStarted,
-            yieldWaitMs: resumed - waitStarted,
+            yieldWaitMs: resumed - waitStarted - prepareSyncMs,
             yieldCount,
             selectedRowCount: sessions.length,
             dirtyRowCount,
@@ -424,12 +433,12 @@ export async function listProjectedSessions(params: {
             reusedRowCount: sessions.length - materializedRowCount,
           });
         }
-        diagnostics?.finishSyncCpu(cpuPhase, syncCpu);
+        diagnostics?.finishSyncCpu("rowThreadCpuMs", syncCpu);
         syncCpu = undefined;
         params.onResult?.(result);
         return result;
       } finally {
-        diagnostics?.finishSyncCpu(cpuPhase, syncCpu);
+        diagnostics?.finishSyncCpu("rowThreadCpuMs", syncCpu);
       }
     },
   );

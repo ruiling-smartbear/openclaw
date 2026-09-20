@@ -12,8 +12,8 @@ import type {
 import type { FleetCellRecord } from "../fleet/registry.types.js";
 import type {
   WorkerPlacementConflictBinding,
-  readWorkerSessionPlacementProjectionInDatabase,
-} from "../gateway/worker-environments/placement-read-projection.js";
+  WorkerSessionPlacementReadResult,
+} from "../gateway/worker-environments/placement-read-projection.types.js";
 import type { SqliteWorkerStateContext } from "../infra/sqlite-worker-state-context.js";
 import type { AsyncWorkScope } from "../shared/async-work-scope.js";
 import type { OnboardingRecommendationsRecord } from "./onboarding-recommendations.contract.js";
@@ -68,7 +68,7 @@ export type OpenClawStateReadReply = (
       ok: true;
       type: "workers.placementProjection";
       sourceAdmitted: true;
-      result: ReturnType<typeof readWorkerSessionPlacementProjectionInDatabase>;
+      result: WorkerSessionPlacementReadResult;
     }
   | {
       ok: true;
